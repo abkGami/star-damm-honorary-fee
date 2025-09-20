@@ -1,0 +1,28 @@
+[package]
+name = "star-damm-honorary-fee"
+version = "0.1.0"
+description = "Created with Anchor"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "star_damm_honorary_fee"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+
+
+[dependencies]
+anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
+solana-program = { workspace = true }
+spl-token = { workspace = true }
+spl-associated-token-account = { workspace = true }
+# cp-swap = { workspace = true }
+# streamflow = { workspace = true }
+
