@@ -107,7 +107,9 @@ pub fn handler(
     // Validate pool configuration for quote-only fees
     PoolValidator::validate_quote_only_config(
         &ctx.accounts.pool,
+        &ctx.accounts.cp_amm_program.key(),
         &quote_mint,
+        &ctx.accounts.base_mint.key(),
     )?;
     
     // Validate that creator_quote_ata belongs to the correct mint
@@ -139,7 +141,7 @@ pub fn handler(
     // Create the honorary position via cp-amm CPI
     // This is where we'd make the actual cp-amm call to create a position
     // The position should be configured to only accrue quote token fees
-    create_honorary_position_cpi(ctx)?;
+    create_honorary_position_cpi(&ctx)?;
     
     // Emit initialization event
     emit!(HonoraryPositionInitialized {
@@ -160,22 +162,36 @@ pub fn handler(
 }
 
 /// Create the honorary position via cp-amm CPI
-fn create_honorary_position_cpi(ctx: Context<InitializeHonoraryPosition>) -> Result<()> {
-    // This is where we would make the actual CPI call to cp-amm
-    // to create a liquidity position owned by our PDA
-    
-    // The position should be:
-    // 1. Owned by position_owner_pda
-    // 2. Configured to only accrue quote token fees
-    // 3. Properly initialized with the pool
-    
+fn create_honorary_position_cpi(ctx: &Context<InitializeHonoraryPosition>) -> Result<()> {
+    // For quote-only fees, we need to create a position that only accrues fees in one token
+    // This is achieved by placing the entire liquidity range on one side of the current price
+
+    // Determine the tick range for quote-only position
+    // We need to get the current tick from the pool and position accordingly
+    let pool_data = ctx.accounts.pool.try_borrow_data()?;
+    let current_tick = PoolValidator::extract_current_tick(&pool_data)?;
+
+    // For quote-only fees, position the range entirely on one side
+    // Let's position it below current price to collect only token A fees (assuming token A is quote)
+    // In practice, this would be determined by which token is the quote token
+    let tick_lower = current_tick - 100000; // Far below current price
+    let tick_upper = current_tick - 1;       // Just below current price
+
+    // Validate that this tick range would only accrue quote fees
+    PoolValidator::validate_position_for_quote_only_fees(
+        &ctx.accounts.pool,
+        &ctx.accounts.quote_mint.key(),
+        tick_lower,
+        tick_upper,
+    )?;
+
     msg!("Creating honorary position via cp-amm CPI");
     msg!("Position owner PDA: {}", ctx.accounts.position_owner_pda.key());
     msg!("Position account: {}", ctx.accounts.position.key());
-    
+    msg!("Tick range: [{}, {}]", tick_lower, tick_upper);
+
     // Placeholder for actual cp-amm integration
     // In the real implementation, this would be a CPI call like:
-    
     /*
     let vault_key = ctx.accounts.vault.key();
     let seeds = &[
@@ -185,19 +201,27 @@ fn create_honorary_position_cpi(ctx: Context<InitializeHonoraryPosition>) -> Res
         &[ctx.bumps.position_owner_pda],
     ];
     let signer = &[&seeds[..]];
-    
-    let cpi_accounts = cp_amm::cpi::accounts::CreatePosition {
+
+    // Note: This is pseudo-code - actual cp-amm interface may differ
+    let cpi_accounts = cp_amm::cpi::accounts::OpenPosition {
         position: ctx.accounts.position.to_account_info(),
         position_authority: ctx.accounts.position_owner_pda.to_account_info(),
         pool: ctx.accounts.pool.to_account_info(),
+        token_a_vault: /* pool's token A vault */,
+        token_b_vault: /* pool's token B vault */,
         // ... other required accounts
     };
-    
+
     let cpi_program = ctx.accounts.cp_amm_program.to_account_info();
     let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer);
-    
-    cp_amm::cpi::create_position(cpi_ctx, /* position params */)?;
+
+    // Create position with zero liquidity (just for fee accrual)
+    cp_amm::cpi::open_position(cpi_ctx, cp_amm::instruction::OpenPosition {
+        tick_lower_index: tick_lower,
+        tick_upper_index: tick_upper,
+        // No liquidity added - position exists only for fee accrual
+    })?;
     */
-    
+
     Ok(())
 }

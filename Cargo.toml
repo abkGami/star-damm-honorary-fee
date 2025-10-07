@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "programs/*"
+    "programs/star-damm-honorary-fee"
 ]
 resolver = "2"
 

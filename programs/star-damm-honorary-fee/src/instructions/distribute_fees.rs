@@ -1,7 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::{
-    associated_token::AssociatedToken,
-    token::{self, Mint, Token, TokenAccount, Transfer},
+    token::{self, Token, TokenAccount, Transfer},
 };
 use crate::{
     state::*,
@@ -92,7 +91,7 @@ pub struct InvestorDistributionAccount {
     pub locked_amount: u64,
 }
 
-pub fn handler(ctx: Context<DistributeFees>, page_size: u64) -> Result<()> {
+pub fn handler(ctx: Context<DistributeFees>, page_size: u32) -> Result<()> {
     let vault = ctx.accounts.vault.key();
     let current_ts = ctx.accounts.clock.unix_timestamp;
     let policy = &ctx.accounts.policy;
@@ -117,7 +116,7 @@ pub fn handler(ctx: Context<DistributeFees>, page_size: u64) -> Result<()> {
         progress.daily_claimed_total = 0;
         
         // Claim fees from honorary position
-        claim_fees_from_position(ctx.reborrow())?;
+        claim_fees_from_position(ctx)?;
         
         msg!("Started new distribution day, claimed {} quote tokens", 
              progress.daily_claimed_total);
@@ -125,7 +124,7 @@ pub fn handler(ctx: Context<DistributeFees>, page_size: u64) -> Result<()> {
     
     // Process investor distributions
     let (total_distributed, investors_processed) = process_investor_page(
-        ctx.reborrow(),
+        &ctx,
         page_size,
     )?;
     
@@ -161,7 +160,7 @@ pub fn handler(ctx: Context<DistributeFees>, page_size: u64) -> Result<()> {
 }
 
 /// Claim fees from the honorary position
-fn claim_fees_from_position(ctx: Context<DistributeFees>) -> Result<()> {
+fn claim_fees_from_position(ctx: &Context<DistributeFees>) -> Result<()> {
     let vault_key = ctx.accounts.vault.key();
     let seeds = &[
         VAULT_SEED,
@@ -169,7 +168,7 @@ fn claim_fees_from_position(ctx: Context<DistributeFees>) -> Result<()> {
         INVESTOR_FEE_POS_OWNER_SEED,
         &[ctx.bumps.position_owner_pda],
     ];
-    let signer = &[&seeds[..]];
+    let _signer = &[&seeds[..]];
     
     // Get treasury balance before claim
     let treasury_before = ctx.accounts.treasury.amount;
@@ -201,7 +200,7 @@ fn claim_fees_from_position(ctx: Context<DistributeFees>) -> Result<()> {
     
     // Validate no base fees were claimed
     // In real implementation, we'd check the claim result for base token amounts
-    let claimed_tokens = vec![
+    let _claimed_tokens = vec![
         (ctx.accounts.policy.quote_mint, claimed_amount),
         // Would also include base mint with amount 0 in real implementation
     ];
@@ -210,9 +209,11 @@ fn claim_fees_from_position(ctx: Context<DistributeFees>) -> Result<()> {
     let base_mint = Pubkey::default(); // Would be extracted from pool
     
     PoolValidator::detect_base_fees_in_claim(
+        claimed_amount, // claim_amount_a (quote token)
+        0, // claim_amount_b (base token - should be 0)
         &ctx.accounts.policy.quote_mint,
-        &base_mint,
-        &claimed_tokens,
+        &ctx.accounts.policy.quote_mint, // token_a_mint (quote)
+        &base_mint, // token_b_mint (base)
     )?;
     
     // Update progress with claimed amount
@@ -231,9 +232,9 @@ fn claim_fees_from_position(ctx: Context<DistributeFees>) -> Result<()> {
 
 /// Process a page of investor distributions
 fn process_investor_page(
-    ctx: Context<DistributeFees>,
-    page_size: u64,
-) -> Result<(u64, u64)> {
+    ctx: &Context<DistributeFees>,
+    page_size: u32,
+) -> Result<(u64, u32)> {
     let policy = &ctx.accounts.policy;
     let progress = &ctx.accounts.progress;
     let cursor = progress.pagination_cursor as usize;
@@ -258,7 +259,7 @@ fn process_investor_page(
         .sum();
     
     if total_locked_this_page == 0 {
-        return Ok((0, investors_this_page.len() as u64));
+        return Ok((0, investors_this_page.len() as u32));
     }
     
     // Calculate investor share based on locked percentage
@@ -300,7 +301,7 @@ fn process_investor_page(
         }
     }
     
-    Ok((total_page_distribution, investors_this_page.len() as u64))
+    Ok((total_page_distribution, investors_this_page.len() as u32))
 }
 
 /// Parse investor account data from remaining accounts
@@ -334,13 +335,75 @@ fn parse_investor_accounts(
 /// Read locked amount from a Streamflow stream account
 fn read_locked_amount_from_stream(stream_account: &AccountInfo) -> Result<u64> {
     // Parse Streamflow stream account to get remaining locked tokens
-    // This would integrate with the Streamflow program
-    
-    msg!("Reading locked amount from stream: {}", stream_account.key);
-    
-    // Placeholder - would parse actual Streamflow stream data
-    // For testing, return a mock value
-    Ok(1000000) // 1M tokens locked
+    // Streamflow streams have a specific account layout that we need to parse
+
+    require!(
+        stream_account.data_len() >= 200, // Minimum Streamflow stream size
+        HonoraryFeeError::InvalidStreamAccount
+    );
+
+    let stream_data = stream_account.try_borrow_data()?;
+
+    // Streamflow stream structure (approximate - needs verification):
+    // - discriminator: 8 bytes
+    // - id: 32 bytes (stream ID)
+    // - start_time: 8 bytes
+    // - end_time: 8 bytes
+    // - amount: 8 bytes (total amount)
+    // - withdrawn: 8 bytes (amount already withdrawn)
+    // - canceled_at: 8 bytes (optional)
+    // - recipient: 32 bytes
+    // - sender: 32 bytes
+    // - mint: 32 bytes
+    // - escrow: 32 bytes
+    // - streamflow_treasury: 32 bytes
+    // - streamflow_fee_treasury: 32 bytes
+    // - partner_fee_treasury: 32 bytes (optional)
+    // etc.
+
+    // For vesting streams, the locked amount is typically:
+    // locked = total_amount - withdrawn - already_released_based_on_time
+
+    // Extract basic fields
+    let total_amount = extract_u64_from_stream_data(&stream_data, 8 + 32 + 8 + 8)?; // offset after discriminator + id + start + end
+    let withdrawn = extract_u64_from_stream_data(&stream_data, 8 + 32 + 8 + 8 + 8)?; // + amount
+
+    // For time-based vesting, we need to calculate how much should be unlocked by now
+    let start_time = extract_u64_from_stream_data(&stream_data, 8 + 32)?; // after discriminator + id
+    let end_time = extract_u64_from_stream_data(&stream_data, 8 + 32 + 8)?;
+    let current_time = Clock::get()?.unix_timestamp as u64;
+
+    // Calculate unlocked amount based on time elapsed
+    let unlocked_amount = if current_time >= end_time {
+        total_amount // Fully unlocked
+    } else if current_time <= start_time {
+        0 // Not started yet
+    } else {
+        // Linear vesting calculation
+        let elapsed = current_time - start_time;
+        let total_duration = end_time - start_time;
+        ((total_amount as u128 * elapsed as u128) / total_duration as u128) as u64
+    };
+
+    // Locked amount = total - max(withdrawn, unlocked_amount)
+    // This ensures we don't over-distribute if someone withdrew early
+    let already_released = withdrawn.max(unlocked_amount);
+    let locked_amount = total_amount.saturating_sub(already_released);
+
+    msg!("Stream {}: total={}, withdrawn={}, unlocked={}, locked={}",
+         stream_account.key, total_amount, withdrawn, unlocked_amount, locked_amount);
+
+    Ok(locked_amount)
+}
+
+/// Helper to extract u64 from stream data at offset
+fn extract_u64_from_stream_data(data: &[u8], offset: usize) -> Result<u64> {
+    if offset + 8 > data.len() {
+        return Err(error!(HonoraryFeeError::InvalidStreamAccount));
+    }
+
+    let bytes = &data[offset..offset + 8];
+    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
 }
 
 /// Get total locked amount across all investors

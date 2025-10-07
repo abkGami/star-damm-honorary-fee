@@ -23,6 +23,7 @@ anchor-spl = { workspace = true }
 solana-program = { workspace = true }
 spl-token = { workspace = true }
 spl-associated-token-account = { workspace = true }
-# cp-swap = { workspace = true }
-# streamflow = { workspace = true }
+# Add cp-amm and streamflow dependencies when available
+# cp-swap = "0.4.0"  # Meteora cp-amm program
+# streamflow = "0.2.0"  # Streamflow program
 
